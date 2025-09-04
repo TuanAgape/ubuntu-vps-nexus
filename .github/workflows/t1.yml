@@ -10,7 +10,7 @@ permissions:
   actions: read
 
 env:
-  NODE_IDS: "35946712 35845496 35931904 35931905"
+  NODE_IDS: "35946723 35946724 36002957 36002958"
   LOG_MAX_MB: "50"  # giới hạn log trong snapshot (MB)
 
 jobs:
@@ -22,7 +22,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1) Tải state cũ (nếu có) - best-effort, không fail nếu chưa có
+      # 1) Tải state cũ (nếu có) - best-effort
       - name: Download previous state artifact (best-effort)
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
@@ -62,14 +62,7 @@ jobs:
         run: |
           set -euxo pipefail
           curl https://cli.nexus.xyz/ | sh
-          echo "$HOME/.nexus/bin" >> "$GITHUB_PATH"  # cho step sau
-
-      # (Tuỳ chọn) Kiểm tra CLI
-      - name: Verify nexus-network path
-        shell: bash
-        run: |
-          set -euxo pipefail
-          command -v nexus-network && nexus-network --version || true
+          echo "$HOME/.nexus/bin" >> "$GITHUB_PATH"
 
       # 3) Script chạy node (shebang ở cột 1)
       - name: Ensure start script exists
@@ -98,22 +91,20 @@ jobs:
           chmod +x /opt/state/start-nexus.sh
           head -n 20 /opt/state/start-nexus.sh
 
-      # 4) Khởi chạy 4 node trong 4 phiên tmux
+      # 4) Khởi chạy 4 node trong 4 phiên tmux (socket riêng 'nexus' để tránh lệch version)
       - name: Start 4 Nexus nodes in tmux
         shell: bash
         run: |
           set -euxo pipefail
-          # Dừng session cũ nếu trùng tên
           for ID in $NODE_IDS; do
-            tmux has-session -t "node${ID}" 2>/dev/null && tmux kill-session -t "node${ID}" || true
+            tmux -L nexus has-session -t "node${ID}" 2>/dev/null && tmux -L nexus kill-session -t "node${ID}" || true
           done
-          # Tạo session mới
           for ID in $NODE_IDS; do
-            tmux new-session -d -s "node${ID}" "/opt/state/start-nexus.sh ${ID}"
+            tmux -L nexus new-session -d -s "node${ID}" "/opt/state/start-nexus.sh ${ID}"
           done
-          tmux ls || true
+          tmux -L nexus ls || true
 
-      # 5) SSH debug: chạy khi workflow_dispatch; có thể bật cả ở cron bằng repo variable ENABLE_TMATE=1
+      # 5) SSH debug: chạy khi workflow_dispatch; bật ở cron bằng repo variable ENABLE_TMATE=1 nếu cần
       - name: Open tmate (debug)
         if: ${{ github.event_name == 'workflow_dispatch' || vars.ENABLE_TMATE == '1' }}
         uses: mxschmitt/action-tmate@v3
@@ -126,7 +117,7 @@ jobs:
         run: |
           sleep $((5*60*60 + 50*60))
 
-      # 7) Snapshot + nén state (ổn định, giới hạn log)
+      # 7) Snapshot + nén state (rsync; giới hạn log)
       - name: Create state archives
         if: always()
         shell: bash
@@ -139,7 +130,7 @@ jobs:
             tar -czf /tmp/state-bundle/home-runner-nexus.tar.gz -C "$HOME" .nexus
           fi
 
-          # /opt/state (rsync snapshot để tránh "file changed as we read it")
+          # /opt/state → snapshot ổn định bằng rsync
           if [ -d /opt/state ]; then
             SNAP=/tmp/snap/opt/state
             mkdir -p "$SNAP"
@@ -155,7 +146,7 @@ jobs:
               fi
             done
 
-            # Nén snapshot; restore dùng -C / để bung lại đúng /opt/state
+            # Nén snapshot; restore -C / sẽ bung về /opt/state
             sudo tar -czf /tmp/state-bundle/opt-state.tar.gz -C /tmp/snap opt/state
             sudo chown "$USER:$USER" /tmp/state-bundle/opt-state.tar.gz
           fi
